@@ -39,7 +39,7 @@ async function callGeminiForAnswer(userInput) {
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set.');
   
     // [최종 수정] 안정적인 gemini-pro 모델로 변경
-    const model = 'gemini-pro'; 
+    const model = 'gemini-2.5-flash'; 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
     
     // 백그라운드 작업이므로 타임아웃을 25초로 넉넉하게 설정
