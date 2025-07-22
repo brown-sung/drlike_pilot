@@ -46,7 +46,7 @@ const createCallbackWaitResponse = () => {
         version: "2.0",
         useCallback: true,
         data: {
-            text: "네, 질문을 확인했어요. AI가 답변을 열심히 준비하고 있으니 잠시만 기다려주세요! 🤖"
+            text: "생각하고 있어요..."
         }
     };
 };
