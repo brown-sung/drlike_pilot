@@ -1,45 +1,84 @@
-// 파일: index.js (QStash를 이용한 진정한 비동기 처리 최종 코드)
+// 파일: index.js (QStash + gemini-pro 적용 최종 완성본)
 
+// ----------------------------------------------------------------
+//  1. 모듈 및 라이브러리 로드
+// ----------------------------------------------------------------
 const express = require('express');
 const { Client } = require("@upstash/qstash"); // QStash 클라이언트 라이브러리
 const { createResponseFormat, createCallbackWaitResponse } = require('./utils.js');
 const { SYSTEM_PROMPT_HEALTH_CONSULT } = require('./prompt.js');
 
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+
+// ----------------------------------------------------------------
+//  2. 애플리케이션 및 클라이언트 초기화
+// ----------------------------------------------------------------
 const app = express();
 app.use(express.json()); 
 
-// --- 환경 변수에서 설정값 로드 ---
+// 환경 변수에서 설정값 로드
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const QSTASH_TOKEN = process.env.QSTASH_TOKEN;
-const VERCEL_DEPLOYMENT_URL = process.env.VERCEL_URL; // Vercel이 자동으로 주입해주는 내 사이트의 공개 URL
+const VERCEL_DEPLOYMENT_URL = process.env.VERCEL_URL; // Vercel이 자동으로 주입하는 내 사이트의 공개 URL
 
-// --- QStash 클라이언트 초기화 ---
+// QStash 클라이언트 초기화
+// 토큰이 없으면 초기화하지 않고, 에러를 발생시켜 문제를 빨리 인지하도록 함
+if (!QSTASH_TOKEN) {
+  throw new Error("QSTASH_TOKEN is not defined in environment variables.");
+}
 const qstashClient = new Client({
   token: QSTASH_TOKEN,
 });
 
-// --- Gemini API 호출 함수 (이전과 동일) ---
+
+// ----------------------------------------------------------------
+//  3. 핵심 로직 함수: Gemini API 호출
+// ----------------------------------------------------------------
 async function callGeminiForAnswer(userInput) {
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set.');
   
-    const model = 'gemini-1.5-flash';
+    // [최종 수정] 안정적인 gemini-pro 모델로 변경
+    const model = 'gemini-pro'; 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
     
+    // 백그라운드 작업이므로 타임아웃을 25초로 넉넉하게 설정
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000); // 작업 시간이 넉넉하므로 타임아웃을 25초로 늘림
+    const timeout = setTimeout(() => controller.abort(), 25000); 
 
     try {
-        const body = { /* ... 이전 코드와 동일 ... */ };
-        const response = await fetch(url, { /* ... 이전 코드와 동일 ... */ signal: controller.signal });
+        const body = {
+            contents: [
+                { role: 'user', parts: [{ text: SYSTEM_PROMPT_HEALTH_CONSULT }] },
+                { role: 'model', parts: [{ text: "{\n  \"response_text\": \"네, 안녕하세요! Dr.LIKE입니다. 무엇을 도와드릴까요?\",\n  \"follow_up_questions\": [\n    \"아기가 열이 나요\",\n    \"신생아 예방접종 알려줘\"\n  ]\n}" }] },
+                { role: 'user', parts: [{ text: userInput }] }
+            ],
+            generationConfig: {
+                temperature: 0.7,
+                response_mime_type: "application/json",
+            },
+        };
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+        });
+
         if (!response.ok) {
             const errorBody = await response.text();
             throw new Error(`Gemini API Error (${response.status}): ${errorBody}`);
         }
+        
         const data = await response.json();
-        return JSON.parse(data.candidates[0].content.parts[0].text);
+        const rawText = data.candidates[0].content.parts[0].text;
+        return JSON.parse(rawText);
+
     } catch (error) {
-        if (error.name === 'AbortError') { throw new Error('Gemini API call timed out after 25 seconds.'); }
+        if (error.name === 'AbortError') { 
+            throw new Error('Gemini API call timed out after 25 seconds.'); 
+        }
         throw error;
     } finally {
         clearTimeout(timeout);
@@ -47,9 +86,16 @@ async function callGeminiForAnswer(userInput) {
 }
 
 
-// =================================================================
-//  엔드포인트 1: 카카오 요청 처리 (웨이터 역할)
-// =================================================================
+// ----------------------------------------------------------------
+//  4. API 엔드포인트 정의
+// ----------------------------------------------------------------
+
+/**
+ * 엔드포인트 1: /skill (웨이터 역할)
+ * - 카카오톡의 요청을 최초로 받습니다.
+ * - 처리할 작업을 QStash 큐에 등록합니다.
+ * - 카카오톡에 즉시 '대기 응답'을 보냅니다.
+ */
 app.post('/skill', async (req, res) => {
     const userInput = req.body.userRequest?.utterance;
     const callbackUrl = req.body.userRequest?.callbackUrl;
@@ -61,19 +107,16 @@ app.post('/skill', async (req, res) => {
     console.log('[/skill] Received request. Publishing job to QStash...');
 
     try {
-        // QStash에 보낼 작업 내용(payload) 정의
         const jobPayload = {
             userInput: userInput,
             callbackUrl: callbackUrl
         };
         
-        // 작업을 큐에 등록 (destination은 우리 서버의 /api/process-job 엔드포인트)
         await qstashClient.publishJSON({
-            url: `https://${VERCEL_DEPLOYMENT_URL}/api/process-job`, // Vercel의 전체 URL + 주방장 엔드포인트 경로
+            url: `https://${VERCEL_DEPLOYMENT_URL}/api/process-job`,
             body: jobPayload,
         });
 
-        // 작업 등록 후, 카카오 서버에 즉시 '대기 응답'을 보냄
         return res.json(createCallbackWaitResponse());
 
     } catch (error) {
@@ -82,10 +125,12 @@ app.post('/skill', async (req, res) => {
     }
 });
 
-
-// =================================================================
-//  엔드포인트 2: QStash로부터 작업을 받아 실제 처리 (주방장 역할)
-// =================================================================
+/**
+ * 엔드포인트 2: /api/process-job (주방장 역할)
+ * - QStash로부터 작업을 전달받아 실제 처리를 수행합니다.
+ * - 시간이 오래 걸리는 Gemini API 호출을 여기서 담당합니다.
+ * - 처리가 완료되면 카카오 콜백 URL로 최종 결과를 전송합니다.
+ */
 app.post('/api/process-job', async (req, res) => {
     console.log('[/api/process-job] Received job from QStash.');
     
@@ -93,16 +138,12 @@ app.post('/api/process-job', async (req, res) => {
         const { userInput, callbackUrl } = req.body;
         console.log(`[/api/process-job] Processing job for: "${userInput}"`);
 
-        // 시간이 오래 걸리는 Gemini API 호출 실행
         const aiResult = await callGeminiForAnswer(userInput);
-        
-        // 최종 응답 포맷 생성
         const finalResponse = createResponseFormat(
             aiResult.response_text,
             aiResult.follow_up_questions
         );
 
-        // 최종 결과를 카카오 콜백 URL로 전송
         await fetch(callbackUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -110,19 +151,24 @@ app.post('/api/process-job', async (req, res) => {
         });
         
         console.log('[/api/process-job] Job processed and callback sent successfully.');
-        // QStash에게 "작업 성공" 신호 전송
         return res.status(200).send("Job processed successfully.");
 
     } catch (error) {
-        console.error("[/api/process-job] Error processing job:", error);
-        // QStash에게 "작업 실패" 신호를 보내면, QStash가 설정에 따라 재시도함
+        console.error("[/api/process-job] Error processing job:", error.message);
         return res.status(500).send("Failed to process job.");
     }
 });
 
-
+/**
+ * 엔드포인트 3: / (헬스 체크 역할)
+ * - 서버가 살아있는지 간단히 확인하는 용도입니다.
+ */
 app.get("/", (req, res) => {
-    res.status(200).send("Dr.LIKE Health Consultation Bot (QStash Ready) is running!");
+    res.status(200).send("Dr.LIKE Health Consultation Bot (QStash Ready & Stable) is running!");
 });
 
+
+// ----------------------------------------------------------------
+//  5. 애플리케이션 내보내기
+// ----------------------------------------------------------------
 module.exports = app;
