@@ -1,4 +1,4 @@
-// 파일: index.js
+// 파일: index.js (수정된 최종본)
 
 const express = require('express');
 const { SYSTEM_PROMPT_HEALTH_CONSULT } = require('./prompt.js');
@@ -20,7 +20,7 @@ async function callGeminiForAnswer(userInput) {
     const body = {
         contents: [
             { role: 'user', parts: [{ text: SYSTEM_PROMPT_HEALTH_CONSULT }] },
-            { role: 'model', parts: [{ text: "{\n  \"response_text\": \"네, 안녕하세요! Dr.LIKE입니다. 무엇을 도와드릴까요?\",\n  \"follow_up_questions\": [\n    \"아기가 열이 나요\",\n    \"신생아 예방접종 알려줘\"\n  ]\n}" }] }, // Few-shot example
+            { role: 'model', parts: [{ text: "{\n  \"response_text\": \"네, 안녕하세요! Dr.LIKE입니다. 무엇을 도와드릴까요?\",\n  \"follow_up_questions\": [\n    \"아기가 열이 나요\",\n    \"신생아 예방접종 알려줘\"\n  ]\n}" }] },
             { role: 'user', parts: [{ text: userInput }] }
         ],
         generationConfig: {
@@ -50,22 +50,17 @@ async function callGeminiForAnswer(userInput) {
 async function processAndCallback(userInput, callbackUrl) {
     let finalResponse;
     try {
-        // 1. Gemini API 호출
         const aiResult = await callGeminiForAnswer(userInput);
-        
-        // 2. 카카오톡 응답 형식으로 가공
         finalResponse = createResponseFormat(
             aiResult.response_text,
             aiResult.follow_up_questions
         );
-
     } catch (error) {
         console.error('백그라운드 작업 중 오류 발생:', error);
         const errorText = "죄송해요, 답변을 생성하는 중 문제가 발생했어요. 잠시 후 다시 시도해주세요. 😥";
         finalResponse = createResponseFormat(errorText, ["다시 시작하기"]);
     }
 
-    // 3. 콜백 URL로 최종 답변 전송
     await fetch(callbackUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -77,25 +72,36 @@ async function processAndCallback(userInput, callbackUrl) {
 // 카카오 i 빌더 스킬 엔드포인트
 app.post('/skill', async (req, res) => {
     const callbackUrl = req.body.userRequest?.callbackUrl;
-
-    if (!callbackUrl) {
-        // callbackUrl이 없는 구형 버전 요청은 직접 응답
-        return res.status(400).json({
-             version: "2.0",
-             template: {
-                 outputs: [{
-                     simpleText: { text: "오류: 현재 사용 중인 버전에서는 이 기능을 지원하지 않아요." }
-                 }]
-             }
-        });
-    }
-
-    // 1. 즉시 대기 응답 전송
-    res.json(createCallbackWaitResponse());
-
-    // 2. 비동기 작업 실행 (await 없음!)
     const userInput = req.body.userRequest.utterance;
-    processAndCallback(userInput, callbackUrl);
+
+    /**
+     * 분기 처리: callbackUrl 유무에 따라 동작을 나눔
+     * - 있을 경우: 비동기 콜백 처리 (빠른 1차 응답 -> 백그라운드 작업 -> 최종 응답)
+     * - 없을 경우: 동기 처리 (느리지만 그 자리에서 바로 최종 응답)
+     */
+    if (callbackUrl) {
+        // [비동기 콜백 처리 로직]
+        // 1. 즉시 대기 응답 전송
+        res.json(createCallbackWaitResponse());
+        // 2. 비동기 작업 실행 (await 없음!)
+        processAndCallback(userInput, callbackUrl);
+    } else {
+        // [동기 처리 로직]
+        console.log("콜백 URL이 없어 동기 방식으로 처리합니다.");
+        try {
+            const aiResult = await callGeminiForAnswer(userInput);
+            const finalResponse = createResponseFormat(
+                aiResult.response_text,
+                aiResult.follow_up_questions
+            );
+            return res.json(finalResponse);
+        } catch (error) {
+            console.error('동기 처리 중 오류 발생:', error);
+            const errorText = "죄송해요, 답변을 생성하는 중 문제가 발생했어요. 잠시 후 다시 시도해주세요. 😥";
+            const errorResponse = createResponseFormat(errorText, ["다시 시작하기"]);
+            return res.status(500).json(errorResponse);
+        }
+    }
 });
 
 
