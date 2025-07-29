@@ -46,7 +46,7 @@ const createCallbackWaitResponse = () => {
         version: "2.0",
         useCallback: true,
         data: {
-            text: "생각하고 있어요..."
+            text: "네, 답변드릴게요 💫"
         }
     };
 };
